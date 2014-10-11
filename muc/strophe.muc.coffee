@@ -25,6 +25,7 @@ Strophe.addConnectionPlugin 'muc',
     Strophe.addNamespace 'MUC_ADMIN',     Strophe.NS.MUC+"#admin"
     Strophe.addNamespace 'MUC_USER',      Strophe.NS.MUC+"#user"
     Strophe.addNamespace 'MUC_ROOMCONF',  Strophe.NS.MUC+"#roomconfig"
+    Strophe.addNamespace 'MUC_REGISTER', "jabber:iq:register"
 
   ###Function
   Join a multi-user chat room
@@ -212,6 +213,33 @@ Strophe.addConnectionPlugin 'muc',
     return msgid
 
   ###Function
+  Send a mediated multiple invitation.
+  Parameters:
+  (String) room - The multi-user chat room name.
+  (Array) receivers - The invitation's receivers.
+  (String) reason - Optional reason for joining the room.
+  Returns:
+  msgiq - the unique id used to send the invitation
+  ###
+  multipleInvites: (room, receivers, reason) ->
+    msgid = @_connection.getUniqueId()
+    invitation = $msg(
+      from: @_connection.jid
+      to: room
+      id: msgid )
+    .c('x', xmlns: Strophe.NS.MUC_USER)
+
+    for receiver in receivers
+      invitation.c 'invite', to: receiver
+      if reason?
+        invitation.c 'reason', reason
+        invitation.up()
+      invitation.up()
+
+    @_connection.send invitation
+    return msgid
+
+  ###Function
   Send a direct invitation.
   Parameters:
   (String) room - The multi-user chat room name.
@@ -321,6 +349,27 @@ Strophe.addConnectionPlugin 'muc',
       type: "set" )
     .c("query", xmlns: Strophe.NS.MUC_OWNER)
     .c("x", xmlns: "jabber:x:data", type: "submit")
+    @_connection.sendIQ roomiq.tree(), success_cb, error_cb
+
+  ###Function
+  Parameters:
+  (String) room - The multi-user chat room name.
+  (Object) config - the configuration. ex: {"muc#roomconfig_publicroom": "0", "muc#roomconfig_persistentroom": "1"}
+  Returns:
+  id - the unique id used to create the chat room.
+  ###
+  createConfiguredRoom: (room, config, success_cb, error_cb) ->
+    roomiq = $iq(
+      to: room
+      type: "set" )
+    .c("query", xmlns: Strophe.NS.MUC_OWNER)
+    .c("x", xmlns: "jabber:x:data", type: "submit")
+
+    # Owner submits configuration form
+    roomiq.c('field', { 'var': 'FORM_TYPE' }).c('value').t('http://jabber.org/protocol/muc#roomconfig').up().up();
+
+    roomiq.c('field', { 'var': k}).c('value').t(v).up().up() for own k, v of config
+
     @_connection.sendIQ roomiq.tree(), success_cb, error_cb
 
   ###Function
@@ -468,6 +517,71 @@ Strophe.addConnectionPlugin 'muc',
     @_connection.send presence.tree()
 
   ###Function
+  Registering with a room.
+  @see http://xmpp.org/extensions/xep-0045.html#register
+  Parameters:
+  (String) room - The multi-user chat room name.
+  (Function) handle_cb - Function to call for room list return.
+  (Function) error_cb - Function to call on error.
+  ###
+  registrationRequest: (room, handle_cb, error_cb) ->
+    iq = $iq(
+        to: room,
+        from: @_connection.jid,
+        type: "get"
+      )
+    .c("query", xmlns: Strophe.NS.MUC_REGISTER)
+
+    @_connection.sendIQ iq, (stanza) ->
+      $fields = stanza.getElementsByTagName 'field'
+      length = $fields.length
+      fields =
+        required: []
+        optional: []
+
+      for $field in $fields
+        field =
+          var: $field.getAttribute 'var'
+          label: $field.getAttribute 'label'
+          type: $field.getAttribute 'type'
+
+        if $field.getElementsByTagName('required').length > 0
+          fields.required.push field
+        else
+          fields.optional.push field
+
+      handle_cb fields
+    , error_cb
+
+  ###Function
+  Submits registration form.
+  Parameters:
+  (String) room - The multi-user chat room name.
+  (Function) handle_cb - Function to call for room list return.
+  (Function) error_cb - Function to call on error.
+  ###
+  submitRegistrationForm: (room, fields, handle_cb, error_cb) ->
+    iq = $iq({
+      to: room,
+      type: "set"
+    }).c("query", xmlns: Strophe.NS.MUC_REGISTER);
+    iq.c("x",
+      xmlns: "jabber:x:data",
+      type: "submit"
+    );
+    iq.c('field', 'var': 'FORM_TYPE')
+    .c('value')
+    .t('http://jabber.org/protocol/muc#register')
+    .up().up()
+
+    for key, val of fields
+      iq.c('field', 'var': key)
+      .c('value')
+      .t(val).up().up()
+
+    @._connection.sendIQ iq, handle_cb, error_cb
+
+  ###Function
   List all chat room available on a server.
   Parameters:
   (String) server - name of chat server.
@@ -516,6 +630,9 @@ class XmppRoom
   invite: (receiver, reason) ->
     @client.invite @name, receiver, reason
 
+  multipleInvites: (receivers, reason) ->
+    @client.invite @name, receivers, reason
+
   directInvite: (receiver, reason) ->
     @client.directInvite @name, receiver, reason, @password
 
@@ -554,7 +671,7 @@ class XmppRoom
 
   modifyAffiliation: (jid, affiliation, reason, success_cb, error_cb) ->
     @client.modifyAffiliation @name,
-      jid, affiliation, reason
+      jid, affiliation, reason,
       success_cb, error_cb
 
   ban: (jid, reason, handler_cb, error_cb) ->
@@ -635,7 +752,7 @@ class XmppRoom
     nick = data.nick
     newnick = data.newnick or null
     switch data.type
-      when 'error' then return
+      when 'error' then return true
       when 'unavailable'
         if newnick
           data.nick = newnick
@@ -669,9 +786,8 @@ class XmppRoom
   ###
   @_parsePresence: (pres) ->
     data = {}
-    a = pres.attributes
-    data.nick = Strophe.getResourceFromJid a.from.textContent
-    data.type = a.type?.textContent or null
+    data.nick = Strophe.getResourceFromJid pres.getAttribute("from")
+    data.type = pres.getAttribute("type")
     data.states = []
     for c in pres.childNodes
       switch c.nodeName
@@ -680,19 +796,17 @@ class XmppRoom
         when "show"
           data.show = c.textContent or null
         when "x"
-          a = c.attributes
-          if a.xmlns?.textContent is Strophe.NS.MUC_USER
+          if c.getAttribute("xmlns") is Strophe.NS.MUC_USER
             for c2 in c.childNodes
               switch c2.nodeName
                 when "item"
-                  a = c2.attributes
-                  data.affiliation = a.affiliation?.textContent or null
-                  data.role = a.role?.textContent or null
-                  data.jid = a.jid?.textContent or null
-                  data.newnick = a.nick?.textContent or null
+                  data.affiliation = c2.getAttribute("affiliation")
+                  data.role = c2.getAttribute("role")
+                  data.jid = c2.getAttribute("jid")
+                  data.newnick = c2.getAttribute("nick")
                 when "status"
-                  if c2.attributes.code
-                    data.states.push c2.attributes.code.textContent
+                  if c2.getAttribute("code")
+                    data.states.push c2.getAttribute("code")
     data
 
 class RoomConfig
@@ -713,17 +827,15 @@ class RoomConfig
           identity[attr.name] = attr.textContent for attr in attrs
           @identities.push identity
         when "feature"
-          @features.push attrs.var.textContent
+          @features.push child.getAttribute("var")
         when "x"
-          attrs = child.childNodes[0].attributes
           break if (
-            (not attrs.var.textContent is 'FORM_TYPE') or
-            (not attrs.type.textContent is 'hidden') )
+            (not child.childNodes[0].getAttribute("var") is 'FORM_TYPE') or
+            (not child.childNodes[0].getAttribute("type") is 'hidden') )
           for field in child.childNodes when not field.attributes.type
-            attrs = field.attributes
             @x.push (
-              var: attrs.var.textContent
-              label: attrs.label.textContent or ""
+              var: field.getAttribute("var")
+              label: field.getAttribute("label") or ""
               value: field.firstChild.textContent or "" )
 
     "identities": @identities, "features": @features, "x": @x

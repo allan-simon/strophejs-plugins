@@ -11,6 +11,7 @@
 
 (function() {
   var Occupant, RoomConfig, XmppRoom,
+    __hasProp = {}.hasOwnProperty,
     __bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; };
 
   Strophe.addConnectionPlugin('muc', {
@@ -28,7 +29,8 @@
       Strophe.addNamespace('MUC_OWNER', Strophe.NS.MUC + "#owner");
       Strophe.addNamespace('MUC_ADMIN', Strophe.NS.MUC + "#admin");
       Strophe.addNamespace('MUC_USER', Strophe.NS.MUC + "#user");
-      return Strophe.addNamespace('MUC_ROOMCONF', Strophe.NS.MUC + "#roomconfig");
+      Strophe.addNamespace('MUC_ROOMCONF', Strophe.NS.MUC + "#roomconfig");
+      return Strophe.addNamespace('MUC_REGISTER', "jabber:iq:register");
     },
 
     /*Function
@@ -56,7 +58,7 @@
         xmlns: Strophe.NS.MUC
       });
       if (history_attrs != null) {
-        msg = msg.c("history", history_attrs).up;
+        msg = msg.c("history", history_attrs).up();
       }
       if (password != null) {
         msg.cnode(Strophe.xmlElement("password", [], password));
@@ -246,6 +248,40 @@
     },
 
     /*Function
+    Send a mediated multiple invitation.
+    Parameters:
+    (String) room - The multi-user chat room name.
+    (Array) receivers - The invitation's receivers.
+    (String) reason - Optional reason for joining the room.
+    Returns:
+    msgiq - the unique id used to send the invitation
+     */
+    multipleInvites: function(room, receivers, reason) {
+      var invitation, msgid, receiver, _i, _len;
+      msgid = this._connection.getUniqueId();
+      invitation = $msg({
+        from: this._connection.jid,
+        to: room,
+        id: msgid
+      }).c('x', {
+        xmlns: Strophe.NS.MUC_USER
+      });
+      for (_i = 0, _len = receivers.length; _i < _len; _i++) {
+        receiver = receivers[_i];
+        invitation.c('invite', {
+          to: receiver
+        });
+        if (reason != null) {
+          invitation.c('reason', reason);
+          invitation.up();
+        }
+        invitation.up();
+      }
+      this._connection.send(invitation);
+      return msgid;
+    },
+
+    /*Function
     Send a direct invitation.
     Parameters:
     (String) room - The multi-user chat room name.
@@ -390,6 +426,37 @@
         xmlns: "jabber:x:data",
         type: "submit"
       });
+      return this._connection.sendIQ(roomiq.tree(), success_cb, error_cb);
+    },
+
+    /*Function
+    Parameters:
+    (String) room - The multi-user chat room name.
+    (Object) config - the configuration. ex: {"muc#roomconfig_publicroom": "0", "muc#roomconfig_persistentroom": "1"}
+    Returns:
+    id - the unique id used to create the chat room.
+     */
+    createConfiguredRoom: function(room, config, success_cb, error_cb) {
+      var k, roomiq, v;
+      roomiq = $iq({
+        to: room,
+        type: "set"
+      }).c("query", {
+        xmlns: Strophe.NS.MUC_OWNER
+      }).c("x", {
+        xmlns: "jabber:x:data",
+        type: "submit"
+      });
+      roomiq.c('field', {
+        'var': 'FORM_TYPE'
+      }).c('value').t('http://jabber.org/protocol/muc#roomconfig').up().up();
+      for (k in config) {
+        if (!__hasProp.call(config, k)) continue;
+        v = config[k];
+        roomiq.c('field', {
+          'var': k
+        }).c('value').t(v).up().up();
+      }
       return this._connection.sendIQ(roomiq.tree(), success_cb, error_cb);
     },
 
@@ -558,6 +625,79 @@
     },
 
     /*Function
+    Registering with a room.
+    @see http://xmpp.org/extensions/xep-0045.html#register
+    Parameters:
+    (String) room - The multi-user chat room name.
+    (Function) handle_cb - Function to call for room list return.
+    (Function) error_cb - Function to call on error.
+     */
+    registrationRequest: function(room, handle_cb, error_cb) {
+      var iq;
+      iq = $iq({
+        to: room,
+        from: this._connection.jid,
+        type: "get"
+      }).c("query", {
+        xmlns: Strophe.NS.MUC_REGISTER
+      });
+      return this._connection.sendIQ(iq, function(stanza) {
+        var $field, $fields, field, fields, length, _i, _len;
+        $fields = stanza.getElementsByTagName('field');
+        length = $fields.length;
+        fields = {
+          required: [],
+          optional: []
+        };
+        for (_i = 0, _len = $fields.length; _i < _len; _i++) {
+          $field = $fields[_i];
+          field = {
+            "var": $field.getAttribute('var'),
+            label: $field.getAttribute('label'),
+            type: $field.getAttribute('type')
+          };
+          if ($field.getElementsByTagName('required').length > 0) {
+            fields.required.push(field);
+          } else {
+            fields.optional.push(field);
+          }
+        }
+        return handle_cb(fields);
+      }, error_cb);
+    },
+
+    /*Function
+    Submits registration form.
+    Parameters:
+    (String) room - The multi-user chat room name.
+    (Function) handle_cb - Function to call for room list return.
+    (Function) error_cb - Function to call on error.
+     */
+    submitRegistrationForm: function(room, fields, handle_cb, error_cb) {
+      var iq, key, val;
+      iq = $iq({
+        to: room,
+        type: "set"
+      }).c("query", {
+        xmlns: Strophe.NS.MUC_REGISTER
+      });
+      iq.c("x", {
+        xmlns: "jabber:x:data",
+        type: "submit"
+      });
+      iq.c('field', {
+        'var': 'FORM_TYPE'
+      }).c('value').t('http://jabber.org/protocol/muc#register').up().up();
+      for (key in fields) {
+        val = fields[key];
+        iq.c('field', {
+          'var': key
+        }).c('value').t(val).up().up();
+      }
+      return this._connection.sendIQ(iq, handle_cb, error_cb);
+    },
+
+    /*Function
     List all chat room available on a server.
     Parameters:
     (String) server - name of chat server.
@@ -622,6 +762,10 @@
 
     XmppRoom.prototype.invite = function(receiver, reason) {
       return this.client.invite(this.name, receiver, reason);
+    };
+
+    XmppRoom.prototype.multipleInvites = function(receivers, reason) {
+      return this.client.invite(this.name, receivers, reason);
     };
 
     XmppRoom.prototype.directInvite = function(receiver, reason) {
@@ -781,7 +925,7 @@
       newnick = data.newnick || null;
       switch (data.type) {
         case 'error':
-          return;
+          return true;
         case 'unavailable':
           if (newnick) {
             data.nick = newnick;
@@ -820,15 +964,14 @@
      */
 
     XmppRoom._parsePresence = function(pres) {
-      var a, c, c2, data, _i, _j, _len, _len1, _ref, _ref1, _ref2, _ref3, _ref4, _ref5, _ref6, _ref7;
+      var c, c2, data, _i, _j, _len, _len1, _ref, _ref1;
       data = {};
-      a = pres.attributes;
-      data.nick = Strophe.getResourceFromJid(a.from.textContent);
-      data.type = ((_ref = a.type) != null ? _ref.textContent : void 0) || null;
+      data.nick = Strophe.getResourceFromJid(pres.getAttribute("from"));
+      data.type = pres.getAttribute("type");
       data.states = [];
-      _ref1 = pres.childNodes;
-      for (_i = 0, _len = _ref1.length; _i < _len; _i++) {
-        c = _ref1[_i];
+      _ref = pres.childNodes;
+      for (_i = 0, _len = _ref.length; _i < _len; _i++) {
+        c = _ref[_i];
         switch (c.nodeName) {
           case "status":
             data.status = c.textContent || null;
@@ -837,22 +980,20 @@
             data.show = c.textContent || null;
             break;
           case "x":
-            a = c.attributes;
-            if (((_ref2 = a.xmlns) != null ? _ref2.textContent : void 0) === Strophe.NS.MUC_USER) {
-              _ref3 = c.childNodes;
-              for (_j = 0, _len1 = _ref3.length; _j < _len1; _j++) {
-                c2 = _ref3[_j];
+            if (c.getAttribute("xmlns") === Strophe.NS.MUC_USER) {
+              _ref1 = c.childNodes;
+              for (_j = 0, _len1 = _ref1.length; _j < _len1; _j++) {
+                c2 = _ref1[_j];
                 switch (c2.nodeName) {
                   case "item":
-                    a = c2.attributes;
-                    data.affiliation = ((_ref4 = a.affiliation) != null ? _ref4.textContent : void 0) || null;
-                    data.role = ((_ref5 = a.role) != null ? _ref5.textContent : void 0) || null;
-                    data.jid = ((_ref6 = a.jid) != null ? _ref6.textContent : void 0) || null;
-                    data.newnick = ((_ref7 = a.nick) != null ? _ref7.textContent : void 0) || null;
+                    data.affiliation = c2.getAttribute("affiliation");
+                    data.role = c2.getAttribute("role");
+                    data.jid = c2.getAttribute("jid");
+                    data.newnick = c2.getAttribute("nick");
                     break;
                   case "status":
-                    if (c2.attributes.code) {
-                      data.states.push(c2.attributes.code.textContent);
+                    if (c2.getAttribute("code")) {
+                      data.states.push(c2.getAttribute("code"));
                     }
                 }
               }
@@ -893,25 +1034,22 @@
             this.identities.push(identity);
             break;
           case "feature":
-            this.features.push(attrs["var"].textContent);
+            this.features.push(child.getAttribute("var"));
             break;
           case "x":
-            attrs = child.childNodes[0].attributes;
-            if ((!attrs["var"].textContent === 'FORM_TYPE') || (!attrs.type.textContent === 'hidden')) {
+            if ((!child.childNodes[0].getAttribute("var") === 'FORM_TYPE') || (!child.childNodes[0].getAttribute("type") === 'hidden')) {
               break;
             }
             _ref = child.childNodes;
             for (_k = 0, _len2 = _ref.length; _k < _len2; _k++) {
               field = _ref[_k];
-              if (!(!field.attributes.type)) {
-                continue;
+              if (!field.attributes.type) {
+                this.x.push({
+                  "var": field.getAttribute("var"),
+                  label: field.getAttribute("label") || "",
+                  value: field.firstChild.textContent || ""
+                });
               }
-              attrs = field.attributes;
-              this.x.push({
-                "var": attrs["var"].textContent,
-                label: attrs.label.textContent || "",
-                value: field.firstChild.textContent || ""
-              });
             }
         }
       }
